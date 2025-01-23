@@ -348,7 +348,7 @@ def _jsdiv(P, Q):
 
 
 if __name__ == '__main__':
-    a = torch.randn([16, 2048, 3]).cuda()
-    b = torch.randn([16, 2048, 3]).cuda()
+    a = torch.randn([16, 1024, 3]).cuda()
+    b = torch.randn([16, 1024, 3]).cuda()
     print(EMD_CD(a, b, batch_size=8))
     

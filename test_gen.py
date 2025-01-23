@@ -9,7 +9,7 @@ from utils.dataset import *
 from utils.misc import *
 from utils.data import *
 from models.vae_gaussian import *
-from models.vae_flow import *
+from models.cond_vae_flow import *
 from models.flow import add_spectral_norm, spectral_norm_power_iteration
 from evaluation import *
 
@@ -36,14 +36,14 @@ def normalize_point_clouds(pcs, mode, logger):
 # Arguments
 parser = argparse.ArgumentParser()
 parser.add_argument('--ckpt', type=str, default='./pretrained/GEN_airplane.pt')
-parser.add_argument('--categories', type=str_list, default=['airplane'])
+parser.add_argument('--categories', type=str_list, default=['ibs'])
 parser.add_argument('--save_dir', type=str, default='./results')
 parser.add_argument('--device', type=str, default='cuda')
 # Datasets and loaders
-parser.add_argument('--dataset_path', type=str, default='./data/shapenet.hdf5')
+parser.add_argument('--dataset_path', type=str, default='./data/IBS_7d')
 parser.add_argument('--batch_size', type=int, default=128)
 # Sampling
-parser.add_argument('--sample_num_points', type=int, default=2048)
+parser.add_argument('--sample_num_points', type=int, default=1024)
 parser.add_argument('--normalize', type=str, default='shape_bbox', choices=[None, 'shape_unit', 'shape_bbox'])
 parser.add_argument('--seed', type=int, default=9988)
 args = parser.parse_args()
@@ -63,11 +63,17 @@ seed_all(args.seed)
 
 # Datasets and loaders
 logger.info('Loading datasets...')
-test_dset = ShapeNetCore(
+# test_dset = ShapeNetCore(
+#     path=args.dataset_path,
+#     cates=args.categories,
+#     split='test',
+#     scale_mode=args.normalize,
+# )
+test_dset = IBSDataset(
     path=args.dataset_path,
-    cates=args.categories,
     split='test',
-    scale_mode=args.normalize,
+    overfit=False,
+    point_dim=3
 )
 test_loader = DataLoader(test_dset, batch_size=args.batch_size, num_workers=0)
 
@@ -76,7 +82,7 @@ logger.info('Loading model...')
 if ckpt['args'].model == 'gaussian':
     model = GaussianVAE(ckpt['args']).to(args.device)
 elif ckpt['args'].model == 'flow':
-    model = FlowVAE(ckpt['args']).to(args.device)
+    model = ConditionalFlowVAE(ckpt['args']).to(args.device)
 logger.info(repr(model))
 # if ckpt['args'].spectral_norm:
 #     add_spectral_norm(model, logger=logger)
@@ -84,8 +90,10 @@ model.load_state_dict(ckpt['state_dict'])
 
 # Reference Point Clouds
 ref_pcs = []
+scene_pcs = []
 for i, data in enumerate(test_dset):
     ref_pcs.append(data['pointcloud'].unsqueeze(0))
+    scene_pcs.append(data['scene'].unsqueeze(0))
 ref_pcs = torch.cat(ref_pcs, dim=0)
 
 # Generate Point Clouds
@@ -93,7 +101,7 @@ gen_pcs = []
 for i in tqdm(range(0, math.ceil(len(test_dset) / args.batch_size)), 'Generate'):
     with torch.no_grad():
         z = torch.randn([args.batch_size, ckpt['args'].latent_dim]).to(args.device)
-        x = model.sample(z, args.sample_num_points, flexibility=ckpt['args'].flexibility)
+        x = model.sample(z, scene_pcs[i], args.sample_num_points, flexibility=ckpt['args'].flexibility)
         gen_pcs.append(x.detach().cpu())
 gen_pcs = torch.cat(gen_pcs, dim=0)[:len(test_dset)]
 if args.normalize is not None:

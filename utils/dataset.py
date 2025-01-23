@@ -143,3 +143,68 @@ class ShapeNetCore(Dataset):
             data = self.transform(data)
         return data
 
+class IBSDataset(Dataset):
+
+    def __init__(self, path, split, hand_type='shadow', overfit=False,point_dim=3):
+        super().__init__()
+        assert split in ('train', 'val', 'test')
+        self.path = path
+        self.split = split
+        self.hand_type = hand_type
+        self.point_dim = point_dim
+        self.pointclouds = []
+        self.overfit = overfit
+        
+        scene_names = [n[6:11] for n in os.listdir(os.path.join(path, "scene_pc"))]
+        self.scene_pcs = [np.load(os.path.join(path, "scene_pc", f"scene_{scene_name}.npy")) for scene_name in scene_names]
+        self.ibs_npzs = [np.load(os.path.join(path, hand_type, f"ibs_{scene_name}.npz")) for scene_name in scene_names]
+        self.idx2scene = []
+        for idx, ibs_npz in enumerate(self.ibs_npzs):
+            ibs_nums = 0
+            for grasp_code in ibs_npz:
+                if len(ibs_npz[grasp_code].shape) == 1:
+                    continue
+                elif len(ibs_npz[grasp_code].shape) == 2:
+                    self.pointclouds.append(torch.from_numpy(ibs_npz[grasp_code]).unsqueeze(0))
+                    ibs_nums += 1
+                elif len(ibs_npz[grasp_code].shape) == 3:
+                    self.pointclouds.append(torch.from_numpy(ibs_npz[grasp_code]))
+                    ibs_nums += len(ibs_npz[grasp_code])
+                else:
+                    raise ValueError
+            self.idx2scene += [idx]*ibs_nums
+        self.pointclouds = torch.cat(self.pointclouds, dim=0)
+        self.pointclouds = self.pointclouds[:, :, :self.point_dim]
+        self.idx2scene = torch.tensor(self.idx2scene)
+        # 将self.pointclouds和self.scene_pcs进行相同的shuffle
+        torch.random.manual_seed(2020)
+        perm = torch.randperm(len(self.pointclouds))
+        self.pointclouds = self.pointclouds[perm]
+        self.idx2scene = self.idx2scene[perm]
+
+        if self.overfit:
+            self.pointclouds = self.pointclouds[0].unsqueeze(0)
+        else:
+            train_ratio = 0.8
+            test_ratio = 0.1
+            train_num = int(len(self.pointclouds) * train_ratio)
+            test_num = int(len(self.pointclouds) * test_ratio)
+            val_num = len(self.pointclouds) - train_num - test_num
+            if self.split == 'train':
+                self.pointclouds = self.pointclouds[:train_num]
+            elif self.split == 'test':
+                self.pointclouds = self.pointclouds[train_num:train_num + test_num]
+            elif self.split == 'val':
+                self.pointclouds = self.pointclouds[train_num + test_num:]
+            else:
+                raise ValueError
+        print(f"Loaded {len(self.pointclouds)} point clouds from {path}.")
+        
+    def __len__(self):
+        return len(self.pointclouds)
+    
+    def __getitem__(self, idx):
+        return {"pointcloud": self.pointclouds[idx],
+                "scene_pc":self.scene_pcs[self.idx2scene[idx]],
+                "shift":torch.zeros([1,3]),
+                "scale":torch.ones([1,1])}

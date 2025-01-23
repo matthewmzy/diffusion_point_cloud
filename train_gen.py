@@ -11,7 +11,7 @@ from utils.dataset import *
 from utils.misc import *
 from utils.data import *
 from models.vae_gaussian import *
-from models.vae_flow import *
+from models.cond_vae_flow import *
 from models.flow import add_spectral_norm, spectral_norm_power_iteration
 from evaluation import *
 
@@ -30,17 +30,21 @@ parser.add_argument('--truncate_std', type=float, default=2.0)
 parser.add_argument('--latent_flow_depth', type=int, default=14)
 parser.add_argument('--latent_flow_hidden_dim', type=int, default=256)
 parser.add_argument('--num_samples', type=int, default=4)
-parser.add_argument('--sample_num_points', type=int, default=2048)
+parser.add_argument('--sample_num_points', type=int, default=1024)
 parser.add_argument('--kl_weight', type=float, default=0.001)
 parser.add_argument('--residual', type=eval, default=True, choices=[True, False])
 parser.add_argument('--spectral_norm', type=eval, default=False, choices=[True, False])
 
 # Datasets and loaders
-parser.add_argument('--dataset_path', type=str, default='./data/shapenet.hdf5')
-parser.add_argument('--categories', type=str_list, default=['airplane'])
+parser.add_argument('--dataset_path', type=str, default='./data/IBS_7d')
+parser.add_argument('--categories', type=str_list, default=['ibs'])
 parser.add_argument('--scale_mode', type=str, default='shape_unit')
 parser.add_argument('--train_batch_size', type=int, default=128)
 parser.add_argument('--val_batch_size', type=int, default=64)
+parser.add_argument('--overfit', action='store_true')
+parser.add_argument('--point_dim', type=int, default=3)
+parser.add_argument('--condition_dim', type=int, default=256)
+parser.add_argument('--scene_name', type=str, default='08000')
 
 # Optimizer and scheduler
 parser.add_argument('--lr', type=float, default=2e-3)
@@ -51,6 +55,7 @@ parser.add_argument('--sched_start_epoch', type=int, default=200*THOUSAND)
 parser.add_argument('--sched_end_epoch', type=int, default=400*THOUSAND)
 
 # Training
+parser.add_argument('--ckpt', type=str, default=None)
 parser.add_argument('--seed', type=int, default=2020)
 parser.add_argument('--logging', type=eval, default=True, choices=[True, False])
 parser.add_argument('--log_root', type=str, default='./logs_gen')
@@ -79,18 +84,32 @@ logger.info(args)
 # Datasets and loaders
 logger.info('Loading datasets...')
 
-train_dset = ShapeNetCore(
-    path=args.dataset_path,
-    cates=args.categories,
-    split='train',
-    scale_mode=args.scale_mode,
-)
-val_dset = ShapeNetCore(
-    path=args.dataset_path,
-    cates=args.categories,
-    split='val',
-    scale_mode=args.scale_mode,
-)
+if 'IBS' in args.dataset_path:
+    train_dset = IBSDataset(
+        path=args.dataset_path,
+        split='train',
+        overfit=args.overfit,
+        point_dim=args.point_dim,
+    )
+    val_dset = IBSDataset(
+        path=args.dataset_path,
+        split='val',
+        overfit=args.overfit,
+        point_dim=args.point_dim,
+    )
+else:
+    train_dset = ShapeNetCore(
+        path=args.dataset_path,
+        cates=args.categories,
+        split='train',
+        scale_mode=args.scale_mode,
+    )
+    val_dset = ShapeNetCore(
+        path=args.dataset_path,
+        cates=args.categories,
+        split='val',
+        scale_mode=args.scale_mode,
+    )
 train_iter = get_data_iterator(DataLoader(
     train_dset,
     batch_size=args.train_batch_size,
@@ -102,7 +121,7 @@ logger.info('Building model...')
 if args.model == 'gaussian':
     model = GaussianVAE(args).to(args.device)
 elif args.model == 'flow':
-    model = FlowVAE(args).to(args.device)
+    model = ConditionalFlowVAE(args).to(args.device)
 logger.info(repr(model))
 if args.spectral_norm:
     add_spectral_norm(model, logger=logger)
@@ -120,11 +139,22 @@ scheduler = get_linear_scheduler(
     end_lr=args.end_lr
 )
 
+# Load checkpoint
+if args.ckpt is not None:
+    logger.info('Loading checkpoint from %s...' % args.ckpt)
+    ckpt = torch.load(args.ckpt)
+    model.load_state_dict(ckpt['state_dict'])
+    optimizer.load_state_dict(ckpt['others']['optimizer'])
+    scheduler.load_state_dict(ckpt['others']['scheduler'])
+    it = int(args.ckpt.split('_')[-1].split('.')[0])
+    logger.info('Loaded checkpoint from %s, iteration %d' % (args.ckpt, it))
+
 # Train, validate and test
 def train(it):
     # Load data
     batch = next(train_iter)
     x = batch['pointcloud'].to(args.device)
+    c = batch['scene_pc'].to(args.device)
 
     # Reset grad and model state
     optimizer.zero_grad()
@@ -134,7 +164,7 @@ def train(it):
 
     # Forward
     kl_weight = args.kl_weight
-    loss = model.get_loss(x, kl_weight=kl_weight, writer=writer, it=it)
+    loss = model.get_loss(x, c, kl_weight=kl_weight, writer=writer, it=it)
 
     # Backward and optimize
     loss.backward()
@@ -151,26 +181,27 @@ def train(it):
     writer.add_scalar('train/grad_norm', orig_grad_norm, it)
     writer.flush()
 
-def validate_inspect(it):
+def validate_inspect(it, c=None):
     z = torch.randn([args.num_samples, args.latent_dim]).to(args.device)
-    x = model.sample(z, args.sample_num_points, flexibility=args.flexibility) #, truncate_std=args.truncate_std)
+    c = torch.from_numpy(c).unsqueeze(0).repeat(args.num_samples, 1, 1).to(args.device)
+    x = model.sample(z, c, args.sample_num_points, flexibility=args.flexibility) #, truncate_std=args.truncate_std)
     writer.add_mesh('val/pointcloud', x, global_step=it)
     writer.flush()
     logger.info('[Inspect] Generating samples...')
 
-def test(it):
+def test(it, c=None):
     ref_pcs = []
+    c = torch.from_numpy(c).unsqueeze(0).repeat(args.val_batch_size, 1, 1).to(args.device)
     for i, data in enumerate(val_dset):
         if i >= args.test_size:
             break
         ref_pcs.append(data['pointcloud'].unsqueeze(0))
     ref_pcs = torch.cat(ref_pcs, dim=0)
-
     gen_pcs = []
     for i in tqdm(range(0, math.ceil(args.test_size / args.val_batch_size)), 'Generate'):
         with torch.no_grad():
             z = torch.randn([args.val_batch_size, args.latent_dim]).to(args.device)
-            x = model.sample(z, args.sample_num_points, flexibility=args.flexibility)
+            x = model.sample(z, c, args.sample_num_points, flexibility=args.flexibility)
             gen_pcs.append(x.detach().cpu())
     gen_pcs = torch.cat(gen_pcs, dim=0)[:args.test_size]
 
@@ -208,17 +239,18 @@ def test(it):
 logger.info('Start training...')
 try:
     it = 1
+    scene_pc = np.load(os.path.join(args.dataset_path, "scene_pc", f"scene_{args.scene_name}.npy"))
     while it <= args.max_iters:
         train(it)
         if it % args.val_freq == 0 or it == args.max_iters:
-            validate_inspect(it)
+            validate_inspect(it, scene_pc)
             opt_states = {
                 'optimizer': optimizer.state_dict(),
                 'scheduler': scheduler.state_dict(),
             }
             ckpt_mgr.save(model, args, 0, others=opt_states, step=it)
         if it % args.test_freq == 0 or it == args.max_iters:
-            test(it)
+            test(it, scene_pc)
         it += 1
 
 except KeyboardInterrupt:
