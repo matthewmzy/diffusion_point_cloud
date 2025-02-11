@@ -174,7 +174,7 @@ class IBSDataset(Dataset):
                     raise ValueError
             self.idx2scene += [idx]*ibs_nums
         self.pointclouds = torch.cat(self.pointclouds, dim=0)
-        self.pointclouds = self.pointclouds[:, :, :self.point_dim]
+        self.pointclouds = self.pointclouds[:, torch.randperm(self.pointclouds.shape[1])[:256], :self.point_dim] # CHANGE
         self.idx2scene = torch.tensor(self.idx2scene)
         # 将self.pointclouds和self.scene_pcs进行相同的shuffle
         torch.random.manual_seed(2020)

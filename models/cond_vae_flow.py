@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from .common import *
 from .encoders import *
 from .diffusion import *
-from .cond_flow import *
+from .flow import *
 
 
 
@@ -16,13 +16,13 @@ class ConditionalFlowVAE(nn.Module):
         super(ConditionalFlowVAE, self).__init__()
         self.args = args
         # Initialize the encoder with conditional information
-        self.encoder = PointNetEncoder(args.latent_dim)
-        self.scene_encoder = PointNetEncoderSingle(args.condition_dim)
+        self.encoder = PointNetEncoder(args.latent_dim, input_dim=args.point_dim)
+        self.scene_encoder = PointNetEncoder(args.condition_dim, input_dim=3)
         # Build conditional flow layers
-        self.flow = build_conditional_latent_flow(args)
+        self.flow = build_latent_flow(args)
         # Initialize the diffusion model
         self.diffusion = DiffusionPoint(
-            net=PointwiseNet(point_dim=3, context_dim=args.latent_dim, residual=args.residual),
+            net=PointwiseNet(point_dim=args.point_dim, context_dim=args.latent_dim+args.condition_dim, residual=args.residual),
             var_sched=VarianceSchedule(
                 num_steps=args.num_steps,
                 beta_1=args.beta_1,
@@ -43,24 +43,25 @@ class ConditionalFlowVAE(nn.Module):
         
         # Step 1: Get latent variables z_mu and z_sigma (encoder output)
         z_mu, z_sigma = self.encoder(x)
-        c = self.scene_encoder(c)
+        z_prime_mu, z_prime_sigma = self.scene_encoder(c)
         
         # Step 2: Reparameterization to sample latent variable z
         z = reparameterize_gaussian(mean=z_mu, logvar=z_sigma)
+        z_prime = reparameterize_gaussian(mean=z_prime_mu, logvar=z_prime_sigma)
         
-        # Step 3: Calculate the entropy term (H[Q(z|X)])
-        entropy = gaussian_entropy(logvar=z_sigma)  # Entropy of the variational distribution
-        
-        # Step 4: Apply normalizing flow to the latent variable z
+        # Step 3: Apply normalizing flow to the latent variable z
         # Here, w is the transformed latent variable in the prior space
-        w, delta_log_pw = self.flow(z, c, torch.zeros([batch_size, 1]).to(z), reverse=False)  # Reverse=False for forward pass
+        w, delta_log_pw = self.flow(z, torch.zeros([batch_size, 1]).to(z), reverse=False)  # Reverse=False for forward pass
         
         # Log probability under standard normal prior
         log_pw = standard_normal_logprob(w).view(batch_size, -1).sum(dim=1, keepdim=True)
         log_pz = log_pw - delta_log_pw.view(batch_size, 1)
+
+        # Step 4: Calculate the entropy term (H[Q(z|X)])
+        entropy = gaussian_entropy(logvar=z_sigma)  # Entropy of the variational distribution
         
         # Step 5: Calculate negative ELBO of P(X|z) using diffusion model
-        neg_elbo = self.diffusion.get_loss(x, z)  # Diffusion loss
+        neg_elbo = self.diffusion.get_loss(x, torch.cat([z, z_prime], dim=1))  # Diffusion loss
         
         # Step 6: Compute total loss
         loss_entropy = -entropy.mean()
@@ -90,15 +91,16 @@ class ConditionalFlowVAE(nn.Module):
             truncate_std: Optionally truncate the standard deviation for sampling
         """
         batch_size, _ = w.size()
-        c = self.scene_encoder(c)
+        c_mu, c_sigma = self.scene_encoder(c)
+        c = reparameterize_gaussian(mean=c_mu, logvar=c_sigma)
         
         if truncate_std is not None:
             w = truncated_normal_(w, mean=0, std=1, trunc_std=truncate_std)
         
         # Reverse pass: Use the flow to transform latent variables back to the original space
-        z = self.flow(w, c, reverse=True).view(batch_size, -1)
+        z = self.flow(w, reverse=True).view(batch_size, -1)
         
         # Generate the samples using the diffusion model conditioned on z
-        samples = self.diffusion.sample(num_points, context=z, flexibility=flexibility)
+        samples = self.diffusion.sample(num_points, context=torch.cat([z, c], dim=1), flexibility=flexibility, point_dim=self.args.point_dim)
         
         return samples

@@ -56,12 +56,12 @@ class PointwiseNet(Module):
         self.act = F.leaky_relu
         self.residual = residual
         self.layers = ModuleList([
-            ConcatSquashLinear(3, 128, context_dim+3),
+            ConcatSquashLinear(point_dim, 128, context_dim+3),
             ConcatSquashLinear(128, 256, context_dim+3),
             ConcatSquashLinear(256, 512, context_dim+3),
             ConcatSquashLinear(512, 256, context_dim+3),
             ConcatSquashLinear(256, 128, context_dim+3),
-            ConcatSquashLinear(128, 3, context_dim+3)
+            ConcatSquashLinear(128, point_dim, context_dim+3)
         ])
 
     def forward(self, x, beta, context):

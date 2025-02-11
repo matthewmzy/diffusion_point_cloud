@@ -12,6 +12,7 @@ from models.vae_gaussian import *
 from models.cond_vae_flow import *
 from models.flow import add_spectral_norm, spectral_norm_power_iteration
 from evaluation import *
+import open3d as o3d
 
 def normalize_point_clouds(pcs, mode, logger):
     if mode is None:
@@ -35,7 +36,7 @@ def normalize_point_clouds(pcs, mode, logger):
 
 # Arguments
 parser = argparse.ArgumentParser()
-parser.add_argument('--ckpt', type=str, default='./pretrained/GEN_airplane.pt')
+parser.add_argument('--ckpt', type=str, default='./logs_gen/GEN_2025_02_07__10_06_39/ckpt_0.000000_192000.pt')
 parser.add_argument('--categories', type=str_list, default=['ibs'])
 parser.add_argument('--save_dir', type=str, default='./results')
 parser.add_argument('--device', type=str, default='cuda')
@@ -93,7 +94,7 @@ ref_pcs = []
 scene_pcs = []
 for i, data in enumerate(test_dset):
     ref_pcs.append(data['pointcloud'].unsqueeze(0))
-    scene_pcs.append(data['scene'].unsqueeze(0))
+    scene_pcs.append(data['scene_pc'].unsqueeze(0))
 ref_pcs = torch.cat(ref_pcs, dim=0)
 
 # Generate Point Clouds
@@ -101,9 +102,21 @@ gen_pcs = []
 for i in tqdm(range(0, math.ceil(len(test_dset) / args.batch_size)), 'Generate'):
     with torch.no_grad():
         z = torch.randn([args.batch_size, ckpt['args'].latent_dim]).to(args.device)
-        x = model.sample(z, scene_pcs[i], args.sample_num_points, flexibility=ckpt['args'].flexibility)
+        x = model.sample(z, scene_pcs[i*args.batch_size:(i+1)*args.batch_size], args.sample_num_points, flexibility=ckpt['args'].flexibility)
         gen_pcs.append(x.detach().cpu())
 gen_pcs = torch.cat(gen_pcs, dim=0)[:len(test_dset)]
+scene_pcs = torch.cat(scene_pcs, dim=0)[:len(test_dset)]
+for i in range(len(gen_pcs)):
+    o3d_scene_pc = o3d.geometry.PointCloud()
+    o3d_scene_pc.points = o3d.utility.Vector3dVector(scene_pcs[i].numpy())
+    o3d.io.write_point_cloud(os.path.join(save_dir, 'scene_%d.ply' % i), o3d_scene_pc)
+    o3d_scene_pc.paint_uniform_color([0.5, 0.5, 0.5])
+    o3d_gen_pc = o3d.geometry.PointCloud()
+    o3d_gen_pc.points = o3d.utility.Vector3dVector(gen_pcs[i].numpy())
+    o3d.io.write_point_cloud(os.path.join(save_dir, 'gen_%d.ply' % i), o3d_gen_pc)
+    o3d_gen_pc.paint_uniform_color([1, 0, 0.5])
+    (o3d_gen_pc+o3d_scene_pc).show()
+
 if args.normalize is not None:
     gen_pcs = normalize_point_clouds(gen_pcs, mode=args.normalize, logger=logger)
 
